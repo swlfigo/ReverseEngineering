@@ -254,3 +254,41 @@ Interceptor.attach(integrityCheckFunction, {
 3. **Hook memcmp/hash**: 看谁在比较代码段内存
 4. **Hook dispatch_source**: 找 10-30 秒间隔的定时器
 5. **搜索特征**: 在保护 SDK 模块中搜索受保护函数地址的引用 (ADRP/LDR)
+
+---
+
+## 实测验证结论
+
+### 测试环境
+
+集换社 v3.36.1, JMCodeProtect SDK, 目标: hook `+[JMBox125 JMBox167:JMBox501:]`
+
+### 测试结果
+
+| bypass 配置 | 结果 | 分析 |
+|------------|------|------|
+| SVC NOP 单独 | App 卡住 | dyld 检测未绕过，App 无法初始化 |
+| SVC + dyld + 基础 | App 初始化但 hook 没触发 | 缺 strstr/open 等 hook 导致异常 |
+| **完整 bypass** (SVC + dyld + 全套) | **✓ 60s 稳定, 7 次 hook 成功** | 所有自杀路径被阻断 |
+| 完整 bypass 去掉 exit/kill | ✓ 25s 存活 | SVC NOP 已阻断内核级自杀 |
+
+### 核心发现
+
+**之前以为需要额外方案绕过完整性检查，实际不需要。**
+
+完整性检查的自杀路径走的是 SVC 系统调用（内核级 exit/kill）。SVC NOP 已经把这些调用全部无效化了。检查器检测到代码被修改，但杀不死进程。
+
+**真正导致闪退的不是完整性检查，而是 bypass 不完整** — 早期脚本缺少某些 Frida 检测的 hook（如 strstr/open/connect），App 在初始化阶段就被 Frida 检测杀掉了，时间上恰好和完整性检查的 15 秒周期吻合，造成了误判。
+
+### 通用结论
+
+```
+场景                                     最佳方案
+──────────────────────────────────────────────────────
+自杀路径用 SVC 系统调用 (大部分 iOS SDK)    SVC NOP (一招解决所有)
+自杀路径用纯用户态 exit/kill               hook exit/kill/abort/syscall
+自杀路径用异常触发 (非法指令/空指针)        全局异常处理器
+不确定自杀路径                             全套 bypass (SVC + hook + 异常处理器)
+```
+
+**经验教训**: 遇到 hook 后闪退时，先确保 bypass 脚本完整覆盖所有检测层。不要急着寻找"更高级"的绕过方案，问题可能就是 bypass 少了一两个 hook。
